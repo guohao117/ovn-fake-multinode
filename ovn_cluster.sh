@@ -11,6 +11,7 @@ BASE_IMAGE="ovn/cinc"
 CENTRAL_IMAGE="ovn/ovn-multi-node"
 CHASSIS_IMAGE="ovn/ovn-multi-node"
 GW_IMAGE="ovn/ovn-multi-node"
+VTEP_IMAGE="ovn/ovn-multi-node"
 
 USE_OVN_RPMS="${USE_OVN_RPMS:-no}"
 EXTRA_OPTIMIZE="${EXTRA_OPTIMIZE:-no}"
@@ -19,12 +20,16 @@ OS_IMAGE=${OS_IMAGE:-"fedora:31"}
 CENTRAL_NAME="ovn-central"
 CHASSIS_PREFIX="${CHASSIS_PREFIX:-ovn-chassis-}"
 GW_PREFIX="ovn-gw-"
+VTEP_PREFIX="ovn-vtep-"
 
 CHASSIS_COUNT=${CHASSIS_COUNT:-2}
 CHASSIS_NAMES=()
 
 GW_COUNT=${GW_COUNT:-1}
 GW_NAMES=()
+
+VTEP_COUNT=${GW_COUNT:-0}
+VTEP_NAMES=()
 
 OVN_BR="br-ovn"
 OVN_EXT_BR="br-ovn-ext"
@@ -80,6 +85,11 @@ function count-gw() {
     count-containers "${GW_PREFIX}" "${filter}"
 }
 
+function count-vtep() {
+    local filter=${1:-}
+    count-containers "${VTEP_PREFIX}" "${filter}"
+}
+
 function count-containers() {
   local name=$1
   local filter=${2:-}
@@ -101,6 +111,7 @@ function check-no-containers {
   existing_chassis=$(count-chassis "${filter}")
   existing_central=$(count-central "${filter}")
   existing_gws=$(count-gw "${filter}")
+  existing_vtep=${count-vtep "${filter}"}
   if (( existing_chassis > 0 || existing_central > 0 || existing_gws > 0)); then
     echo
     echo "ERROR: Can't ${operation}.  ${message} (${existing_central} existing central or ${existing_chassis} existing chassis)"
@@ -155,11 +166,14 @@ function stop() {
         for name in "${CHASSIS_NAMES[@]}"; do
             del-ovs-docker-ports ${name}
         done
+        for name in "${VTEP_NAMES[@]}"; do
+            del-ovs-docker-ports ${name}
+        done
     fi
 
     echo "Stopping OVN cluster"
     # Delete the containers
-    for cid in $( ${RUNC_CMD} ps -qa --filter "name=${CENTRAL_NAME}|${GW_PREFIX}|${CHASSIS_PREFIX}" ); do
+    for cid in $( ${RUNC_CMD} ps -qa --filter "name=${CENTRAL_NAME}|${GW_PREFIX}|${CHASSIS_PREFIX}|${VTEP_PREFIX}" ); do
        stop-container ${cid}
     done
 }
@@ -221,6 +235,12 @@ function add-ovs-docker-ports() {
         ${OVS_DOCKER} add-port $br $eth ${name} --ipaddress=${ip}/${cidr}
     done
 
+    for name in "${VTEP_NAMES[@]}"; do
+        (( ip_index += 1))
+        ip=$(./ip_gen.py $ip_range/$cidr $ip_start $ip_index)
+        ${OVS_DOCKER} add-port $br $eth ${name} --ipaddress=${ip}/${cidr}
+    done
+
     if [ "$ovn_central" == "yes" ]; then
         if [ "$OVN_DB_CLUSTER" = "yes" ]; then
             ${OVS_DOCKER} add-port ${OVN_EXT_BR} eth2 ${CENTRAL_NAME}-1
@@ -235,6 +255,10 @@ function add-ovs-docker-ports() {
     fi
 
     for name in "${CHASSIS_NAMES[@]}"; do
+        ${OVS_DOCKER} add-port ${OVN_EXT_BR} eth2 ${name}
+    done
+
+    for name in "${VTEP_NAMES[@]}"; do
         ${OVS_DOCKER} add-port ${OVN_EXT_BR} eth2 ${name}
     done
 }
@@ -272,7 +296,7 @@ fi
 ip=\`ip addr show \$eth | grep inet | grep -v inet6 | awk '{print \$2}' | cut -d'/' -f1\`
 
 ovs-vsctl set open . external_ids:ovn-encap-ip=\$ip
-ovs-vsctl set open . external-ids:ovn-encap-type=geneve
+ovs-vsctl set open . external-ids:ovn-encap-type=geneve,vxlan
 ovs-vsctl set open . external-ids:ovn-remote=\$ovn_remote
 ovs-vsctl set open . external-ids:ovn-openflow-probe-interval=60
 ovs-vsctl set open . external-ids:ovn-remote-probe-interval=180000
@@ -291,9 +315,45 @@ fi
 ip link set eth2 down
 ovs-vsctl add-port br-ex eth2
 ip link set eth2 up
+
+EOF
+    rm -f ${FAKENODE_MNT_DIR}/configure_vtep.sh
+    cat << EOF > ${FAKENODE_MNT_DIR}/configure_vtep.sh
+#!/bin/bash
+
+eth=\$1
+ovn_remote=\$2
+
+if [ "\$eth" = "" ]; then
+    eth=eth1
+fi
+
+if [ "\$ovn_remote" = "" ]; then
+    ovn_remote="tcp:170.168.0.2:6642"
+fi
+
+ip=\`ip addr show \$eth | grep inet | grep -v inet6 | awk '{print \$2}' | cut -d'/' -f1\`
+
+ovs-vsctl add-br br0
+ovs-vsctl add-port br0 p0 -- set interface p0 type=internal -- set interface p0 external_ids:iface-id=sw0-vtep-p0
+ovs-vsctl add-port br0 p1 -- set interface p1 type=internal -- set interface p1 external_ids:iface-id=sw0-vtep-p1
+vtep-ctl add-ps br0
+vtep-ctl set Physical_Switch br0 tunnel_ips=\$ip
+env PYTHONPATH=/usr/share/openvswitch/python /usr/share/openvswitch/scripts/ovs-vtep --log-file=/var/log/openvswitch/ovs-vtep.log --pidfile=/var/run/openvswitch/ovs-vtep.pid --detach br0
+
+ovs-vsctl set open . external_ids:ovn-encap-ip=\$ip
+ovs-vsctl set open . external-ids:ovn-encap-type=vxlan
+ovs-vsctl set open . external-ids:ovn-remote=\$ovn_remote
+
+vtep-ctl add-ls ls0
+sleep 2
+vtep-ctl bind-ls br0 p0 0 ls0
+vtep-ctl bind-ls br0 p1 0 ls0
+
 EOF
 
     chmod 0755 ${FAKENODE_MNT_DIR}/configure_ovn.sh
+    chmod 0755 ${FAKENODE_MNT_DIR}/configure_vtep.sh
 
     if [ "$ovn_central" == "yes" ]; then
         for name in "${GW_NAMES[@]}"; do
@@ -304,6 +364,9 @@ EOF
     for name in "${CHASSIS_NAMES[@]}"; do
         ${RUNC_CMD} exec ${name} bash /data/configure_ovn.sh eth1 \
             ${ovn_remote} not_gw ${ovn_monitor_all}
+    done
+    for name in "${VTEP_NAMES[@]}"; do
+        ${RUNC_CMD} exec ${name} bash /data/configure_vtep.sh eth1 ${ovn_remote}
     done
 }
 
@@ -326,6 +389,9 @@ function wait-containers() {
             [[ ${done} == "0" ]] && continue
         fi
         for name in "${CHASSIS_NAMES[@]}"; do
+            [[ $(count-containers "${name}") == "0" ]] && done="0" && break
+        done
+        for name in "${VTEP_NAMES[@]}"; do
             [[ $(count-containers "${name}") == "0" ]] && done="0" && break
         done
         [[ ${done} == "1" ]] && break
@@ -446,6 +512,10 @@ function start() {
         start-container "${CHASSIS_IMAGE}" "${name}"
     done
 
+    for name in "${VTEP_NAMES[@]}"; do
+        start-container "${VTEP_IMAGE}" "${name}"
+    done
+
     wait-containers ${ovn_central}
 
     echo "Adding ovs-ports"
@@ -497,6 +567,16 @@ function start() {
         ${RUNC_CMD} exec ${name} /usr/share/openvswitch/scripts/ovs-ctl start --system-id=${name}
         ${RUNC_CMD} exec ${name} ${OVNCTL_PATH} start_controller ${SSL_ARGS}
     done
+    # TODO: configure VTEP container
+    for name in "${VTEP_NAMES[@]}"; do
+        SSL_ARGS=
+        if [ "$ENABLE_SSL" == "yes" ]; then
+            SSL_ARGS="--ovn-controller-ssl-key=${SSL_CERTS_PATH}/ovn-privkey.pem --ovn-controller-ssl-cert=${SSL_CERTS_PATH}/ovn-cert.pem --ovn-controller-ssl-ca-cert=${SSL_CERTS_PATH}/pki/switchca/cacert.pem"
+        fi
+        ${RUNC_CMD} exec ${name} ovsdb-tool create /etc/openvswitch/vtep.db /usr/share/openvswitch/vtep.ovsschema
+        ${RUNC_CMD} exec ${name} /usr/share/openvswitch/scripts/ovs-ctl start --system-id=${name} --extra-dbs=vtep.db
+        ${RUNC_CMD} exec ${name} ${OVNCTL_PATH} start_controller_vtep ${SSL_ARGS} --db-sb-sock=${ovn_remote} --db-sock=unix:/var/run/openvswitch/db.sock 
+    done
 
     configure-ovn $ovn_central $ovn_remote ${OVN_MONITOR_ALL}
 }
@@ -526,6 +606,18 @@ ovn-nbctl lsp-add sw0 sw0-port1
 ovn-nbctl lsp-set-addresses sw0-port1 "50:54:00:00:00:03 10.0.0.3 1000::3"
 ovn-nbctl lsp-add sw0 sw0-port2
 ovn-nbctl lsp-set-addresses sw0-port2 "50:54:00:00:00:04 10.0.0.4 1000::4"
+
+# add baremetal
+ovn-nbctl lsp-add sw0 sw0-vtep-p0
+ovn-nbctl lsp-set-type sw0-vtep-p0 vtep
+ovn-nbctl lsp-set-options sw0-vtep-p0 vtep-physical-switch=br0 vtep-logical-switch=ls0
+ovn-nbctl lsp-set-addresses sw0-vtep-p0 "60:54:00:00:00:03 10.0.0.10 1000::10"
+
+ovn-nbctl lsp-add sw0 sw0-vtep-p1
+ovn-nbctl lsp-set-type sw0-vtep-p1 vtep
+ovn-nbctl lsp-set-options sw0-vtep-p1 vtep-physical-switch=br0 vtep-logical-switch=ls0
+ovn-nbctl lsp-set-addresses sw0-vtep-p1 "60:54:00:00:00:04 dynamic"
+ovn-nbctl lsp-set-dhcpv4-options sw0-vtep-p1 \$CIDR_UUID
 
 # Create ports in sw0 that will use dhcp from ovn
 ovn-nbctl lsp-add sw0 sw0-port3
@@ -629,6 +721,39 @@ create_fake_vm \$@
 EOF
     chmod 0755 ${FAKENODE_MNT_DIR}/create_fake_vm.sh
 
+    cat << EOF > ${FAKENODE_MNT_DIR}/create_fake_baremetal.sh
+#!/bin/bash
+create_fake_baremetal() {
+    iface_id=\$1
+    name=\$2
+    mac=\$3
+    ip=\$4
+    mask=\$5
+    gw=\$6
+    ipv6_addr=\$7
+    ipv6_gw=\$8
+    ip netns add \$name
+    ip link set \$name netns \$name
+    ip netns exec \$name ip link set lo up
+    [ -n "\$mac" ] && ip netns exec \$name ip link set \$name address \$mac
+    if [ "\$ip" == "dhcp" ]; then
+      ip netns exec \$name ip link set \$name up
+      #ip netns exec \$name dhclient -sf /bin/fullstack-dhclient-script --no-pid -1 -v --timeout 10 \$name
+      ip netns exec \$name dhclient -sf /bin/fullstack-dhclient-script --no-pid -nw \$name
+    else
+      ip netns exec \$name ip addr add \$ip/\$mask dev \$name
+      ip netns exec \$name ip addr add \$ipv6_addr dev \$name
+      ip netns exec \$name ip link set \$name up
+      ip netns exec \$name ip route add default via \$gw dev \$name
+      ip netns exec \$name ip -6 route add default via \$ipv6_gw dev \$name
+    fi
+}
+
+create_fake_baremetal \$@
+
+EOF
+    chmod 0755 ${FAKENODE_MNT_DIR}/create_fake_baremetal.sh
+
     echo "Creating a fake VM in "${CHASSIS_NAMES[0]}" for logical port - sw0-port1"
     ${RUNC_CMD} exec "${CHASSIS_NAMES[0]}" bash /data/create_fake_vm.sh sw0-port1 sw0p1 50:54:00:00:00:03 10.0.0.3 24 10.0.0.1 1000::3/64 1000::a
     echo "Creating a fake VM in "${CHASSIS_NAMES[1]}" for logical port - sw1-port1"
@@ -638,6 +763,12 @@ EOF
     ${RUNC_CMD} exec "${CHASSIS_NAMES[0]}" bash /data/create_fake_vm.sh sw0-port3 sw0p3 50:54:00:00:00:05 dhcp
     echo "Creating a fake VM in "${CHASSIS_NAMES[1]}" for logical port - sw0-port4 (using dhcp)"
     ${RUNC_CMD} exec "${CHASSIS_NAMES[1]}" bash /data/create_fake_vm.sh sw0-port4 sw0p4 50:54:00:00:00:06 dhcp
+
+    echo "Create a baremetal in "${VTEP_NAMES[0]}" for logical port sw0-vtep-p0"
+    ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw0-vtep-p0 p0 60:54:00:00:00:03 10.0.0.10 24 10.0.0.1 1000::10/64 1000::a
+
+    echo "Create a baremetal in "${VTEP_NAMES[0]}" for logical port sw0-vtep-p1 (using dhcp)"
+    ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw0-vtep-p1 p1 60:54:00:00:00:04 dhcp
 
     echo "Creating a fake VM in the host bridge ${OVN_EXT_BR}"
     ip netns add ovnfake-ext
@@ -809,6 +940,10 @@ case "${1:-""}" in
             GW_NAMES+=( "${GW_PREFIX}${i}" )
         done
 
+        for (( i=1; i<=VTEP_COUNT; i++)); do
+            VTEP_NAMES+=( "${VTEP_PREFIX}${i}" )
+        done
+
         if [[ -n "${REMOVE_EXISTING_CLUSTER}" ]]; then
             stop
         fi
@@ -836,6 +971,9 @@ case "${1:-""}" in
 
         for (( i=1; i<=GW_COUNT; i++ )); do
             GW_NAMES+=( "${GW_PREFIX}${i}" )
+        done
+        for (( i=1; i<=VTEP_COUNT; i++ )); do
+            GW_NAMES+=( "${VTEP_PREFIX}${i}" )
         done
         stop
         ;;
@@ -878,6 +1016,10 @@ case "${1:-""}" in
 
         for (( i=1; i<=GW_COUNT; i++ )); do
             GW_NAMES+=( "${GW_PREFIX}${i}" )
+        done
+
+        for (( i=1; i<=VTEP_COUNT; i++ )); do
+            GW_NAMES+=( "${VTEP_PREFIX}${i}" )
         done
 
         shift;
