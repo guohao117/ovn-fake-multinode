@@ -119,6 +119,9 @@ yum -y --skip-broken install\
 	git\
 	file\
 	lksctp-tools-devel\
+    socat \
+    iperf \
+    omping \
 	hostname
 
 
