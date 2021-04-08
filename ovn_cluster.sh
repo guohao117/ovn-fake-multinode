@@ -28,7 +28,7 @@ CHASSIS_NAMES=()
 GW_COUNT=${GW_COUNT:-1}
 GW_NAMES=()
 
-VTEP_COUNT=${GW_COUNT:-0}
+VTEP_COUNT=${VTEP_COUNT:-0}
 VTEP_NAMES=()
 
 OVN_BR="br-ovn"
@@ -345,10 +345,10 @@ ovs-vsctl set open . external_ids:ovn-encap-ip=\$ip
 ovs-vsctl set open . external-ids:ovn-encap-type=vxlan
 ovs-vsctl set open . external-ids:ovn-remote=\$ovn_remote
 
-vtep-ctl add-ls ls0
+vtep-ctl add-ls sw0
 sleep 2
-vtep-ctl bind-ls br0 p0 0 ls0
-vtep-ctl bind-ls br0 p1 0 ls0
+vtep-ctl bind-ls br0 p0 0 sw0
+vtep-ctl bind-ls br0 p1 0 sw0
 
 EOF
 
@@ -608,16 +608,16 @@ ovn-nbctl lsp-add sw0 sw0-port2
 ovn-nbctl lsp-set-addresses sw0-port2 "50:54:00:00:00:04 10.0.0.4 1000::4"
 
 # add baremetal
-ovn-nbctl lsp-add sw0 sw0-vtep-p0
-ovn-nbctl lsp-set-type sw0-vtep-p0 vtep
-ovn-nbctl lsp-set-options sw0-vtep-p0 vtep-physical-switch=br0 vtep-logical-switch=ls0
-ovn-nbctl lsp-set-addresses sw0-vtep-p0 "60:54:00:00:00:03 10.0.0.10 1000::10"
+#ovn-nbctl lsp-add sw0 sw0-vtep-p0
+#ovn-nbctl lsp-set-type sw0-vtep-p0 vtep
+#ovn-nbctl lsp-set-options sw0-vtep-p0 vtep-physical-switch=br0 vtep-logical-switch=sw0
+#ovn-nbctl lsp-set-addresses sw0-vtep-p0 unknown
 
-ovn-nbctl lsp-add sw0 sw0-vtep-p1
-ovn-nbctl lsp-set-type sw0-vtep-p1 vtep
-ovn-nbctl lsp-set-options sw0-vtep-p1 vtep-physical-switch=br0 vtep-logical-switch=ls0
-ovn-nbctl lsp-set-addresses sw0-vtep-p1 "60:54:00:00:00:04 dynamic"
-ovn-nbctl lsp-set-dhcpv4-options sw0-vtep-p1 \$CIDR_UUID
+#ovn-nbctl lsp-add sw0 sw0-vtep-p1
+#ovn-nbctl lsp-set-type sw0-vtep-p1 vtep
+#ovn-nbctl lsp-set-options sw0-vtep-p1 vtep-physical-switch=br0 vtep-logical-switch=sw0
+#ovn-nbctl lsp-set-addresses sw0-vtep-p1 unknown
+#ovn-nbctl lsp-set-dhcpv4-options sw0-vtep-p1 \$CIDR_UUID
 
 # Create ports in sw0 that will use dhcp from ovn
 ovn-nbctl lsp-add sw0 sw0-port3
@@ -626,6 +626,9 @@ ovn-nbctl lsp-set-dhcpv4-options sw0-port3 \$CIDR_UUID
 ovn-nbctl lsp-add sw0 sw0-port4
 ovn-nbctl lsp-set-addresses sw0-port4 "50:54:00:00:00:06 dynamic"
 ovn-nbctl lsp-set-dhcpv4-options sw0-port4 \$CIDR_UUID
+ovn-nbctl lsp-add sw0 sw0-port5
+ovn-nbctl lsp-set-addresses sw0-port5 "50:54:00:00:00:07 dynamic"
+ovn-nbctl lsp-set-dhcpv4-options sw0-port5 \$CIDR_UUID
 
 # Create the second logical switch with one port
 ovn-nbctl ls-add sw1
@@ -763,12 +766,16 @@ EOF
     ${RUNC_CMD} exec "${CHASSIS_NAMES[0]}" bash /data/create_fake_vm.sh sw0-port3 sw0p3 50:54:00:00:00:05 dhcp
     echo "Creating a fake VM in "${CHASSIS_NAMES[1]}" for logical port - sw0-port4 (using dhcp)"
     ${RUNC_CMD} exec "${CHASSIS_NAMES[1]}" bash /data/create_fake_vm.sh sw0-port4 sw0p4 50:54:00:00:00:06 dhcp
+    echo "Creating a fake VM in "${CHASSIS_NAMES[0]}" for logical port - sw0-port5 (using dhcp)"
+    ${RUNC_CMD} exec "${CHASSIS_NAMES[0]}" bash /data/create_fake_vm.sh sw0-port5 sw0p5 50:54:00:00:00:07 dhcp
 
-    echo "Create a baremetal in "${VTEP_NAMES[0]}" for logical port sw0-vtep-p0"
-    ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw0-vtep-p0 p0 60:54:00:00:00:03 10.0.0.10 24 10.0.0.1 1000::10/64 1000::a
+    if [ "$VTEP_COUNT" -gt 0 ]; then
+        echo "Create a baremetal in "${VTEP_NAMES[0]}" for logical port sw0-vtep-p0"
+        ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw0-vtep-p0 p0 60:54:00:00:00:03 10.0.0.10 24 10.0.0.1 1000::10/64 1000::a
 
-    echo "Create a baremetal in "${VTEP_NAMES[0]}" for logical port sw0-vtep-p1 (using dhcp)"
-    ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw0-vtep-p1 p1 60:54:00:00:00:04 dhcp
+        echo "Create a baremetal in "${VTEP_NAMES[0]}" for logical port sw0-vtep-p1 (using dhcp)"
+        ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw0-vtep-p1 p1 60:54:00:00:00:04 dhcp
+    fi
 
     echo "Creating a fake VM in the host bridge ${OVN_EXT_BR}"
     ip netns add ovnfake-ext
