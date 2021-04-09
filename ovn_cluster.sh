@@ -1,21 +1,17 @@
 #!/bin/bash
 
-[ $EUID -eq 0 ] || { echo 'must be root' >&2; exit 1; }
+# [ $EUID -eq 0 ] || { echo 'must be root' >&2; exit 1; }
 
 #set -o xtrace
 set -o errexit
 
 RUNC_CMD="${RUNC_CMD:-docker}"
 
-BASE_IMAGE="ovn/cinc"
-CENTRAL_IMAGE="ovn/ovn-multi-node"
-CHASSIS_IMAGE="ovn/ovn-multi-node"
-GW_IMAGE="ovn/ovn-multi-node"
-VTEP_IMAGE="ovn/ovn-multi-node"
-
-USE_OVN_RPMS="${USE_OVN_RPMS:-no}"
-EXTRA_OPTIMIZE="${EXTRA_OPTIMIZE:-no}"
-OS_IMAGE=${OS_IMAGE:-"fedora:31"}
+BASE_IMAGE="centos:7"
+CENTRAL_IMAGE="nocsys/ovnlab-node"
+CHASSIS_IMAGE="nocsys/ovnlab-node"
+GW_IMAGE="nocsys/ovnlab-node"
+VTEP_IMAGE="nocsys/ovnlab-node"
 
 CENTRAL_NAME="ovn-central"
 CHASSIS_PREFIX="${CHASSIS_PREFIX:-ovn-chassis-}"
@@ -36,9 +32,6 @@ OVN_EXT_BR="br-ovn-ext"
 OVN_BR_CLEANUP="${OVN_BR_CLEANUP:-yes}"
 
 OVS_DOCKER="./ovs-docker"
-
-OVN_SRC_PATH="${OVN_SRC_PATH:-}"
-OVS_SRC_PATH="${OVS_SRC_PATH:-}"
 
 OVNCTL_PATH=/usr/share/ovn/scripts/ovn-ctl
 
@@ -824,21 +817,9 @@ function start-chassis() {
 }
 
 function build-images() {
-    # Copy dbus.service to a place where image build can see it
-    cp -v /usr/lib/systemd/system/dbus.service . 2>/dev/null || touch dbus.service
-    sed -i 's/OOMScoreAdjust=-900//' ./dbus.service 2>/dev/null || :
-    if echo $OS_IMAGE | grep ubi7
-    then
-        ${RUNC_CMD} build -t ovn/cinc --build-arg OS_IMAGE=${OS_IMAGE} -f fedora/cinc/rhel7-Dockerfile .
-    else
-        ${RUNC_CMD} build -t ovn/cinc --build-arg OS_IMAGE=${OS_IMAGE} -f fedora/cinc/Dockerfile .
-    fi
-
-    ${RUNC_CMD} build -t ovn/ovn-multi-node --build-arg OVS_SRC_PATH=ovs \
-    --build-arg OVN_SRC_PATH=ovn --build-arg USE_OVN_RPMS=${USE_OVN_RPMS} \
-    --build-arg EXTRA_OPTIMIZE=${EXTRA_OPTIMIZE} \
-    --build-arg INSTALL_UTILS_FROM_SOURCES=${INSTALL_UTILS_FROM_SOURCES} \
-    -f  fedora/ovn/Dockerfile .
+    ${RUNC_CMD} build -t nocsys/ovnlab-node --build-arg GITHUB_SRC=https://github.com/ovn-org/ovn.git \
+    --build-arg  OVN_BRANCH=master --build-arg https_proxy=${https_proxy} \
+    -f docker/rhel/Dockerfile ./docker
 }
 
 function check-for-ovn-rpms() {
@@ -854,34 +835,7 @@ function build-images-with-ovn-rpms() {
 }
 
 function build-images-with-ovn-sources() {
-    if [ ! -d ./ovs ]; then
-	    echo "OVS_SRC_PATH = $OVS_SRC_PATH"
-	    if [ "${OVS_SRC_PATH}" = "" ]; then
-            echo "Set the OVS_SRC_PATH var pointing to the location of ovs source code."
-            exit 1
-	    fi
-
-	    rm -rf ./ovs
-	    cp -rf $OVS_SRC_PATH ./ovs
-	    DO_RM_OVS='yes'
-    fi
-
-    if [ ! -d ./ovn ]; then
-	    echo "OVN_SRC_PATH = $OVN_SRC_PATH"
-	    if [ "${OVN_SRC_PATH}" = "" ]; then
-            echo "Set the OVN_SRC_PATH var pointing to the location of ovn source code."
-            exit 1
-	    fi
-	    rm -rf ovn
-	    cp -rf $OVN_SRC_PATH ovn
-	    DO_RM_OVN='yes'
-    fi
-
-    touch tst.rpm
     build-images
-    rm -f tst.rpm
-    [ -n "$DO_RM_OVS" ] && rm -rf ovs ||:
-    [ -n "$DO_RM_OVN" ] && rm -rf ovn ||:
 }
 
 function run-command() {
