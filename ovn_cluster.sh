@@ -1,5 +1,6 @@
 #!/bin/bash
 
+
 # [ $EUID -eq 0 ] || { echo 'must be root' >&2; exit 1; }
 
 #set -o xtrace
@@ -8,10 +9,11 @@ set -o errexit
 RUNC_CMD="${RUNC_CMD:-docker}"
 
 BASE_IMAGE="centos:7"
-CENTRAL_IMAGE="nocsys/ovnlab-node"
-CHASSIS_IMAGE="nocsys/ovnlab-node"
-GW_IMAGE="nocsys/ovnlab-node"
-VTEP_IMAGE="nocsys/ovnlab-node"
+NODE_IMAGE=${NODE_IMAGE:-nocsys/fakenode:latest}
+CENTRAL_IMAGE=${NODE_IMAGE}
+CHASSIS_IMAGE=${NODE_IMAGE}
+GW_IMAGE=${NODE_IMAGE}
+VTEP_IMAGE=${NODE_IMAGE}
 
 CENTRAL_NAME="ovn-central"
 CHASSIS_PREFIX="${CHASSIS_PREFIX:-ovn-chassis-}"
@@ -232,6 +234,8 @@ function add-ovs-docker-ports() {
         (( ip_index += 1))
         ip=$(./ip_gen.py $ip_range/$cidr $ip_start $ip_index)
         ${OVS_DOCKER} add-port $br $eth ${name} --ipaddress=${ip}/${cidr}
+        ip=$(./ip_gen.py $ip_range/$cidr $ip_start $ip_index)
+        ${OVS_DOCKER} add-port $br eth3 ${name} --ipaddress=${ip}/${cidr}
     done
 
     if [ "$ovn_central" == "yes" ]; then
@@ -328,20 +332,22 @@ fi
 ip=\`ip addr show \$eth | grep inet | grep -v inet6 | awk '{print \$2}' | cut -d'/' -f1\`
 
 ovs-vsctl add-br br0
-ovs-vsctl add-port br0 p0 -- set interface p0 type=internal -- set interface p0 external_ids:iface-id=sw0-vtep-p0
-ovs-vsctl add-port br0 p1 -- set interface p1 type=internal -- set interface p1 external_ids:iface-id=sw0-vtep-p1
+ovs-vsctl add-port br0 p0 -- set interface p0 type=internal
+ovs-vsctl add-port br0 p1 -- set interface p1 type=internal
 vtep-ctl add-ps br0
 vtep-ctl set Physical_Switch br0 tunnel_ips=\$ip
-env PYTHONPATH=/usr/share/openvswitch/python /usr/share/openvswitch/scripts/ovs-vtep --log-file=/var/log/openvswitch/ovs-vtep.log --pidfile=/var/run/openvswitch/ovs-vtep.pid --detach br0
+env PYTHONPATH=/usr/share/openvswitch/python /usr/share/openvswitch/scripts/ovs-vtep --log-file=/var/log/openvswitch/ovs-vtep-br0.log --pidfile=/var/run/openvswitch/ovs-vtep-br0.pid --detach br0
 
 ovs-vsctl set open . external_ids:ovn-encap-ip=\$ip
 ovs-vsctl set open . external-ids:ovn-encap-type=vxlan
 ovs-vsctl set open . external-ids:ovn-remote=\$ovn_remote
 
 vtep-ctl add-ls sw0
+vtep-ctl add-ls sw1
 sleep 2
 vtep-ctl bind-ls br0 p0 0 sw0
-vtep-ctl bind-ls br0 p1 0 sw0
+vtep-ctl bind-ls br0 p1 100 sw0
+vtep-ctl bind-ls br0 p1 200 sw1
 
 EOF
 
@@ -580,6 +586,7 @@ function create_fake_vms() {
 
 #set -o xtrace
 set -o errexit
+has_vtep=\$1
 
 ovn-nbctl ls-add sw0
 
@@ -599,18 +606,6 @@ ovn-nbctl lsp-add sw0 sw0-port1
 ovn-nbctl lsp-set-addresses sw0-port1 "50:54:00:00:00:03 10.0.0.3 1000::3"
 ovn-nbctl lsp-add sw0 sw0-port2
 ovn-nbctl lsp-set-addresses sw0-port2 "50:54:00:00:00:04 10.0.0.4 1000::4"
-
-# add baremetal
-#ovn-nbctl lsp-add sw0 sw0-vtep-p0
-#ovn-nbctl lsp-set-type sw0-vtep-p0 vtep
-#ovn-nbctl lsp-set-options sw0-vtep-p0 vtep-physical-switch=br0 vtep-logical-switch=sw0
-#ovn-nbctl lsp-set-addresses sw0-vtep-p0 unknown
-
-#ovn-nbctl lsp-add sw0 sw0-vtep-p1
-#ovn-nbctl lsp-set-type sw0-vtep-p1 vtep
-#ovn-nbctl lsp-set-options sw0-vtep-p1 vtep-physical-switch=br0 vtep-logical-switch=sw0
-#ovn-nbctl lsp-set-addresses sw0-vtep-p1 unknown
-#ovn-nbctl lsp-set-dhcpv4-options sw0-vtep-p1 \$CIDR_UUID
 
 # Create ports in sw0 that will use dhcp from ovn
 ovn-nbctl lsp-add sw0 sw0-port3
@@ -641,6 +636,27 @@ ovn-nbctl lsp-add sw1 sw1-lr0
 ovn-nbctl lsp-set-type sw1-lr0 router
 ovn-nbctl lsp-set-addresses sw1-lr0 router
 ovn-nbctl lsp-set-options sw1-lr0 router-port=lr0-sw1
+
+# add baremetal
+if [ "\$has_vtep" -gt 0 ]; then
+    ovn-nbctl lsp-add sw0 sw0-vtep-p0
+    ovn-nbctl lsp-set-type sw0-vtep-p0 vtep
+    ovn-nbctl lsp-set-options sw0-vtep-p0 vtep-physical-switch=br0 vtep-logical-switch=sw0
+    ovn-nbctl lsp-set-addresses sw0-vtep-p0 unknown
+
+    ovn-nbctl lsp-add sw0 sw0-vtep-p1
+    ovn-nbctl lsp-set-type sw0-vtep-p1 vtep
+    ovn-nbctl lsp-set-options sw0-vtep-p1 vtep-physical-switch=br0 vtep-logical-switch=sw0
+    ovn-nbctl lsp-set-addresses sw0-vtep-p1 unknown
+    #ovn-nbctl lsp-set-dhcpv4-options sw0-vtep-p1 \$CIDR_UUID
+
+    ovn-nbctl lsp-add sw1 sw1-vtep-p1
+    ovn-nbctl lsp-set-type sw1-vtep-p1 vtep
+    ovn-nbctl lsp-set-options sw1-vtep-p1 vtep-physical-switch=br0 vtep-logical-switch=sw1
+    ovn-nbctl lsp-set-addresses sw1-vtep-p1 unknown
+    #ovn-nbctl lsp-set-dhcpv4-options sw1-vtep-p1 \$CIDR_UUID
+
+fi
 
 ovn-nbctl ls-add public
 ovn-nbctl lrp-add lr0 lr0-public 00:00:20:20:12:13 172.16.0.100/24 3000::a/64
@@ -678,7 +694,7 @@ EOF
     else
         central=${CENTRAL_NAME}
     fi
-    ${RUNC_CMD} exec ${central} bash /data/create_ovn_res.sh
+    ${RUNC_CMD} exec ${central} bash /data/create_ovn_res.sh ${VTEP_COUNT}
 
     cat << EOF > ${FAKENODE_MNT_DIR}/create_fake_vm.sh
 #!/bin/bash
@@ -722,26 +738,38 @@ EOF
 create_fake_baremetal() {
     iface_id=\$1
     name=\$2
-    mac=\$3
-    ip=\$4
-    mask=\$5
-    gw=\$6
-    ipv6_addr=\$7
-    ipv6_gw=\$8
-    ip netns add \$name
-    ip link set \$name netns \$name
-    ip netns exec \$name ip link set lo up
-    [ -n "\$mac" ] && ip netns exec \$name ip link set \$name address \$mac
-    if [ "\$ip" == "dhcp" ]; then
-      ip netns exec \$name ip link set \$name up
-      #ip netns exec \$name dhclient -sf /bin/fullstack-dhclient-script --no-pid -1 -v --timeout 10 \$name
-      ip netns exec \$name dhclient -sf /bin/fullstack-dhclient-script --no-pid -nw \$name
+    vtag=\$3
+    mac=\$4
+    ip=\$5
+    mask=\$6
+    gw=\$7
+    ipv6_addr=\$8
+    ipv6_gw=\$9
+    iface=\$name
+    if [ "\$vtag" = "-" ]; then
+        ip netns add \$name
+        ip link set \$name netns \$name
     else
-      ip netns exec \$name ip addr add \$ip/\$mask dev \$name
-      ip netns exec \$name ip addr add \$ipv6_addr dev \$name
-      ip netns exec \$name ip link set \$name up
-      ip netns exec \$name ip route add default via \$gw dev \$name
-      ip netns exec \$name ip -6 route add default via \$ipv6_gw dev \$name
+        iface=\$name.\$vtag
+        if [ ! -f "/var/run/netns/\$name" ]; then
+            ip netns add \$name
+            ip link set \$name netns \$name
+            ip netns exec \$name ip link set \$name up
+        fi
+        ip netns exec \$name ip link add link \$name name \$iface type vlan id \$vtag
+    fi 
+    ip netns exec \$name ip link set lo up
+    [ -n "\$mac" ] && ip netns exec \$name ip link set \$iface address \$mac
+    if [ "\$ip" == "dhcp" ]; then
+      ip netns exec \$name ip link set \$iface up
+      #ip netns exec \$name dhclient -sf /bin/fullstack-dhclient-script --no-pid -1 -v --timeout 10 \$iface
+      ip netns exec \$name dhclient -sf /bin/fullstack-dhclient-script --no-pid -nw \$iface
+    else
+      ip netns exec \$name ip addr add \$ip/\$mask dev \$iface
+      ip netns exec \$name ip addr add \$ipv6_addr dev \$iface
+      ip netns exec \$name ip link set \$iface up
+      # ip netns exec \$name ip route add default via \$gw dev \$iface
+      # ip netns exec \$name ip -6 route add default via \$ipv6_gw dev \$iface
     fi
 }
 
@@ -764,10 +792,12 @@ EOF
 
     if [ "$VTEP_COUNT" -gt 0 ]; then
         echo "Create a baremetal in "${VTEP_NAMES[0]}" for logical port sw0-vtep-p0"
-        ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw0-vtep-p0 p0 60:54:00:00:00:03 10.0.0.10 24 10.0.0.1 1000::10/64 1000::a
+        ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw0-vtep-p0 p0 - 50:54:00:00:00:10 10.0.0.10 24 10.0.0.1 1000::10/64 1000::a
 
-        echo "Create a baremetal in "${VTEP_NAMES[0]}" for logical port sw0-vtep-p1 (using dhcp)"
-        ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw0-vtep-p1 p1 60:54:00:00:00:04 dhcp
+        echo "Create a baremetal in "${VTEP_NAMES[0]}" for logical port sw0-vtep-p1"
+        ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw0-vtep-p1 p1 100 50:54:00:00:00:11 10.0.0.11 24 10.0.0.1 1000::11/64 1000::a
+        echo "Create a baremetal in "${VTEP_NAMES[0]}" for logical port sw1-vtep-p1"
+        ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw1-vtep-p1 p1 200 40:54:00:00:00:10 20.0.0.10 24 20.0.0.1 2000::10/64 2000::a
     fi
 
     echo "Creating a fake VM in the host bridge ${OVN_EXT_BR}"
@@ -817,7 +847,7 @@ function start-chassis() {
 }
 
 function build-images() {
-    ${RUNC_CMD} build -t nocsys/ovnlab-node --build-arg GITHUB_SRC=https://github.com/ovn-org/ovn.git \
+    ${RUNC_CMD} build -t ${NODE_IMAGE} --build-arg GITHUB_SRC=https://github.com/ovn-org/ovn.git \
     --build-arg  OVN_BRANCH=master --build-arg https_proxy=${https_proxy} \
     -f docker/rhel/Dockerfile ./docker
 }
@@ -922,6 +952,7 @@ case "${1:-""}" in
         ;;
     add-chassis)
         GW_COUNT=0
+        VTEP_COUNT=0
         CHASSIS_NAMES=( "$2" )
         start-chassis $3 "yes"
         ;;
@@ -934,7 +965,7 @@ case "${1:-""}" in
             GW_NAMES+=( "${GW_PREFIX}${i}" )
         done
         for (( i=1; i<=VTEP_COUNT; i++ )); do
-            GW_NAMES+=( "${VTEP_PREFIX}${i}" )
+            VTEP_NAMES+=( "${VTEP_PREFIX}${i}" )
         done
         stop
         ;;
