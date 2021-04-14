@@ -332,8 +332,6 @@ fi
 ip=\`ip addr show \$eth | grep inet | grep -v inet6 | awk '{print \$2}' | cut -d'/' -f1\`
 
 ovs-vsctl add-br br0
-ovs-vsctl add-port br0 p0 -- set interface p0 type=internal
-ovs-vsctl add-port br0 p1 -- set interface p1 type=internal
 vtep-ctl add-ps br0
 vtep-ctl set Physical_Switch br0 tunnel_ips=\$ip
 env PYTHONPATH=/usr/share/openvswitch/python /usr/share/openvswitch/scripts/ovs-vtep --log-file=/var/log/openvswitch/ovs-vtep-br0.log --pidfile=/var/run/openvswitch/ovs-vtep-br0.pid --detach br0
@@ -344,10 +342,6 @@ ovs-vsctl set open . external-ids:ovn-remote=\$ovn_remote
 
 vtep-ctl add-ls sw0
 vtep-ctl add-ls sw1
-sleep 2
-vtep-ctl bind-ls br0 p0 0 sw0
-vtep-ctl bind-ls br0 p1 100 sw0
-vtep-ctl bind-ls br0 p1 200 sw1
 
 EOF
 
@@ -736,7 +730,7 @@ EOF
     cat << EOF > ${FAKENODE_MNT_DIR}/create_fake_baremetal.sh
 #!/bin/bash
 create_fake_baremetal() {
-    iface_id=\$1
+    ls=\$1
     name=\$2
     vtag=\$3
     mac=\$4
@@ -746,30 +740,29 @@ create_fake_baremetal() {
     ipv6_addr=\$8
     ipv6_gw=\$9
     iface=\$name
-    if [ "\$vtag" = "-" ]; then
-        ip netns add \$name
-        ip link set \$name netns \$name
-    else
+
+    ovs-vsctl --may-exist add-port br0 \$name -- set Interface \$name type=internal
+    sleep 2
+    vtep-ctl bind-ls br0 \$name \$vtag \$ls
+    if [ "\$vtag" -gt 0 ]; then
         iface=\$name.\$vtag
-        if [ ! -f "/var/run/netns/\$name" ]; then
-            ip netns add \$name
-            ip link set \$name netns \$name
-            ip netns exec \$name ip link set \$name up
-        fi
-        ip netns exec \$name ip link add link \$name name \$iface type vlan id \$vtag
-    fi 
-    ip netns exec \$name ip link set lo up
-    [ -n "\$mac" ] && ip netns exec \$name ip link set \$iface address \$mac
+        ip link set \$name up
+        ip link add link \$name name \$iface type vlan id \$vtag 
+    fi
+    ip netns add \$iface
+    ip link set \$iface netns \$iface
+    ip netns exec \$iface ip link set lo up
+    [ -n "\$mac" ] && ip netns exec \$iface ip link set \$iface address \$mac
     if [ "\$ip" == "dhcp" ]; then
-      ip netns exec \$name ip link set \$iface up
-      #ip netns exec \$name dhclient -sf /bin/fullstack-dhclient-script --no-pid -1 -v --timeout 10 \$iface
-      ip netns exec \$name dhclient -sf /bin/fullstack-dhclient-script --no-pid -nw \$iface
+      ip netns exec \$iface ip link set \$iface up
+      #ip netns exec \$iface dhclient -sf /bin/fullstack-dhclient-script --no-pid -1 -v --timeout 10 \$iface
+      ip netns exec \$iface dhclient -sf /bin/fullstack-dhclient-script --no-pid -nw \$iface
     else
-      ip netns exec \$name ip addr add \$ip/\$mask dev \$iface
-      ip netns exec \$name ip addr add \$ipv6_addr dev \$iface
-      ip netns exec \$name ip link set \$iface up
-      # ip netns exec \$name ip route add default via \$gw dev \$iface
-      # ip netns exec \$name ip -6 route add default via \$ipv6_gw dev \$iface
+      ip netns exec \$iface ip addr add \$ip/\$mask dev \$iface
+      ip netns exec \$iface ip addr add \$ipv6_addr dev \$iface
+      ip netns exec \$iface ip link set \$iface up
+      ip netns exec \$iface ip route add default via \$gw dev \$iface
+      ip netns exec \$iface ip -6 route add default via \$ipv6_gw dev \$iface
     fi
 }
 
@@ -791,13 +784,13 @@ EOF
     ${RUNC_CMD} exec "${CHASSIS_NAMES[0]}" bash /data/create_fake_vm.sh sw0-port5 sw0p5 50:54:00:00:00:07 dhcp
 
     if [ "$VTEP_COUNT" -gt 0 ]; then
-        echo "Create a baremetal in "${VTEP_NAMES[0]}" for logical port sw0-vtep-p0"
-        ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw0-vtep-p0 p0 - 50:54:00:00:00:10 10.0.0.10 24 10.0.0.1 1000::10/64 1000::a
+        echo "Creating a baremetal in "${VTEP_NAMES[0]}" connected to LS sw0"
+        ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw0 p0 0 50:54:00:00:00:10 10.0.0.10 24 10.0.0.1 1000::10/64 1000::a
 
-        echo "Create a baremetal in "${VTEP_NAMES[0]}" for logical port sw0-vtep-p1"
-        ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw0-vtep-p1 p1 100 50:54:00:00:00:11 10.0.0.11 24 10.0.0.1 1000::11/64 1000::a
-        echo "Create a baremetal in "${VTEP_NAMES[0]}" for logical port sw1-vtep-p1"
-        ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw1-vtep-p1 p1 200 40:54:00:00:00:10 20.0.0.10 24 20.0.0.1 2000::10/64 2000::a
+        echo "Creating a baremetal in "${VTEP_NAMES[0]}" connected to LS sw1"
+        ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw0 p1 100 50:54:00:00:00:11 10.0.0.11 24 10.0.0.1 1000::11/64 1000::a
+        echo "Creating a baremetal in "${VTEP_NAMES[0]}" connected to LS sw1"
+        ${RUNC_CMD} exec "${VTEP_NAMES[0]}" bash /data/create_fake_baremetal.sh sw1 p1 200 40:54:00:00:00:10 20.0.0.10 24 20.0.0.1 2000::10/64 2000::a
     fi
 
     echo "Creating a fake VM in the host bridge ${OVN_EXT_BR}"
